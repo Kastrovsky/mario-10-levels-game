@@ -1,0 +1,1037 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>二维平面超级马里奥 · 十关挑战</title>
+<style>
+  /* 深灰页面背景 + 画布水平垂直居中；画布固定 800x450 逻辑分辨率，不随窗口缩放拉伸 */
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #101418;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    width: 800px;
+    height: 450px;
+    image-rendering: pixelated;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="450"></canvas>
+<script>
+(() => {
+'use strict';
+
+// ==================== 一、全局常量 ====================
+const CANVAS_W = 800;        // 画布逻辑宽度（固定，不随窗口缩放）
+const CANVAS_H = 450;        // 画布逻辑高度
+const STEP = 1 / 60;         // 固定物理步长：无论刷新率高低，每步推进 1/60 秒
+const MAX_FRAME_DELTA = 0.1; // 单帧最大累计时间，防止切后台后“时间爆炸”
+
+const MOVE_SPEED = 4.5;      // 水平最大速度（px/帧）
+const FRICTION = 0.85;       // 地面摩擦系数：每帧保留 85% 速度
+const ACCEL = 0.9;           // 水平加速度：实现“按住持续加速”
+const PLAYER_W = 24;
+const PLAYER_H = 32;
+const CROUCH_H_FACTOR = 0.6;      // 下蹲高度 = 60%
+const CROUCH_SPEED_FACTOR = 0.5;  // 下蹲速度 = 50%
+
+const GROUND_Y = 400;        // 地面顶边（世界统一）
+const GROUND_H = 50;         // 地面厚度
+const FALL_DEATH_Y = 480;    // 掉落判定线
+const WIN_X = 780;           // 通关判定线
+const MAX_LIVES = 5;         // 全关卡共用生命
+const INVINCIBLE_TIME = 1.5; // 重生无敌秒数
+const STOMP_SCORE = 100;     // 踩死/踩中敌人得分
+const CLEAR_SCORE = 500;     // 通关奖励
+const MAX_FALL_SPEED = 18;   // 软性终端下落速度
+
+// 逐关物理参数（由 loadLevel 赋值）
+let G = 0.55;    // 当前关卡重力
+let JUMP = -12;  // 当前关卡跳跃初速度
+
+// ==================== 二、10 个关卡数据（难度严格递增） ====================
+// 字段说明：
+//   ground   地面段 {x,w}（缺口即深坑）
+//   platforms 固定单向砖块 {x,y,w,h}
+//   moving   移动平台：linear 水平往复 {x,y,w,h,min,max,speed}；
+//             sine 不规则轨迹 {x,y,w,h,mode:'sine',mid,range,vAmp,speed,phase}
+//   pipes    红色实心管道 {x,y,w,h}
+//   ceilings 头顶实心障碍（强制 S 下蹲）{x,y,w,h}
+//   spikes   尖刺 {x,surfaceY,w,h}（surfaceY = 所在表面顶边）
+//   enemies  walker 地面巡逻 {x,min,max,groundY,speed}；flyer 飞行 {x,min,max,baseY,amp,speed}
+//   boss     巨型敌人 {x,y,min,max,speed,groundY,hp}
+const LEVELS = [
+  {
+    name: '新手草原', stars: 1,
+    gravity: 0.55, jump: -12,
+    bg: ['#5ec9ff', '#d9f3ff'],
+    ground: [{ x: 0, w: 800 }],
+    platforms: [{ x: 150, y: 320, w: 140, h: 18 }, { x: 430, y: 300, w: 140, h: 18 }],
+    moving: [],
+    pipes: [{ x: 360, y: 370, w: 50, h: 30 }],
+    ceilings: [],
+    spikes: [],
+    enemies: [{ type: 'walker', x: 560, min: 550, max: 700, groundY: 400, speed: 1.2 }],
+    boss: null,
+    spawnX: 80
+  },
+  {
+    name: '轻松河畔', stars: 1,
+    gravity: 0.55, jump: -12,
+    bg: ['#66c7f5', '#d8f2ff'],
+    ground: [{ x: 0, w: 350 }, { x: 370, w: 430 }],
+    platforms: [{ x: 150, y: 340, w: 120, h: 18 }, { x: 480, y: 300, w: 100, h: 18 }],
+    moving: [],
+    pipes: [{ x: 600, y: 370, w: 50, h: 30 }],
+    ceilings: [],
+    spikes: [],
+    enemies: [{ type: 'walker', x: 520, min: 480, max: 560, groundY: 400, speed: 1.2 }],
+    boss: null,
+    spawnX: 80
+  },
+  {
+    name: '双坑挑战', stars: 2,
+    gravity: 0.58, jump: -12.5,
+    bg: ['#5fc0f2', '#d2efff'],
+    ground: [{ x: 0, w: 180 }, { x: 230, w: 90 }, { x: 370, w: 430 }],
+    platforms: [{ x: 150, y: 340, w: 90, h: 18 }, { x: 430, y: 310, w: 100, h: 18 }, { x: 620, y: 330, w: 90, h: 18 }],
+    moving: [],
+    pipes: [{ x: 500, y: 370, w: 50, h: 30 }],
+    ceilings: [],
+    spikes: [],
+    enemies: [
+      { type: 'walker', x: 430, min: 400, max: 470, groundY: 400, speed: 1.2 },
+      { type: 'walker', x: 650, min: 600, max: 700, groundY: 400, speed: 1.2 }
+    ],
+    boss: null,
+    spawnX: 80
+  },
+  {
+    name: '敌人谷', stars: 2,
+    gravity: 0.6, jump: -13,
+    bg: ['#59b8ee', '#cdeeff'],
+    ground: [{ x: 0, w: 300 }, { x: 420, w: 380 }],
+    platforms: [{ x: 240, y: 300, w: 80, h: 18 }, { x: 380, y: 250, w: 80, h: 18 }],
+    moving: [],
+    pipes: [{ x: 150, y: 370, w: 50, h: 30 }, { x: 240, y: 370, w: 50, h: 30 }],
+    ceilings: [],
+    spikes: [],
+    enemies: [
+      { type: 'walker', x: 450, min: 420, max: 500, groundY: 400, speed: 1.3 },
+      { type: 'walker', x: 560, min: 520, max: 600, groundY: 400, speed: 1.3 },
+      { type: 'walker', x: 680, min: 640, max: 720, groundY: 400, speed: 1.3 }
+    ],
+    boss: null,
+    spawnX: 80
+  },
+  {
+    name: '三连坑', stars: 3,
+    gravity: 0.6, jump: -13,
+    bg: ['#54b3ea', '#c9edff'],
+    ground: [{ x: 0, w: 120 }, { x: 180, w: 100 }, { x: 340, w: 60 }, { x: 460, w: 340 }],
+    platforms: [{ x: 110, y: 340, w: 60, h: 18 }, { x: 270, y: 330, w: 60, h: 18 }, { x: 390, y: 340, w: 60, h: 18 }],
+    moving: [],
+    pipes: [{ x: 600, y: 370, w: 50, h: 30 }],
+    ceilings: [],
+    spikes: [],
+    enemies: [
+      { type: 'walker', x: 230, min: 200, max: 260, groundY: 400, speed: 1.3 },
+      { type: 'flyer', x: 560, min: 460, max: 680, baseY: 310, amp: 14, speed: 1.6 }
+    ],
+    boss: null,
+    spawnX: 80
+  },
+  {
+    name: '垂直挑战', stars: 3,
+    gravity: 0.58, jump: -13.5,
+    bg: ['#4faee6', '#c6ecff'],
+    ground: [{ x: 0, w: 220 }, { x: 500, w: 300 }],
+    platforms: [
+      { x: 120, y: 360, w: 100, h: 18 }, { x: 200, y: 310, w: 100, h: 18 },
+      { x: 280, y: 350, w: 90, h: 18 }, { x: 350, y: 300, w: 100, h: 18 },
+      { x: 430, y: 340, w: 120, h: 18 }
+    ],
+    moving: [],
+    pipes: [{ x: 100, y: 370, w: 40, h: 30 }, { x: 700, y: 370, w: 50, h: 30 }],
+    ceilings: [],
+    spikes: [],
+    enemies: [
+      { type: 'walker', x: 650, min: 630, max: 670, groundY: 400, speed: 1.4 },
+      { type: 'flyer', x: 575, min: 540, max: 610, baseY: 295, amp: 8, speed: 1.6 }
+    ],
+    boss: null,
+    spawnX: 80
+  },
+  {
+    name: '移动平台', stars: 4,
+    gravity: 0.5, jump: -14,
+    bg: ['#4aa9e2', '#c2eaff'],
+    ground: [{ x: 0, w: 220 }, { x: 700, w: 100 }],
+    platforms: [
+      { x: 120, y: 300, w: 70, h: 18 }, { x: 380, y: 340, w: 80, h: 18 },
+      { x: 520, y: 360, w: 60, h: 18 }, { x: 620, y: 320, w: 80, h: 18 }
+    ],
+    moving: [
+      { x: 240, y: 330, w: 80, h: 18, min: 240, max: 440, speed: 2.2 },
+      { x: 460, y: 300, w: 70, h: 18, min: 460, max: 600, speed: 2.2 }
+    ],
+    pipes: [{ x: 170, y: 370, w: 50, h: 30 }],
+    ceilings: [],
+    spikes: [],
+    enemies: [
+      { type: 'walker', x: 740, min: 710, max: 770, groundY: 400, speed: 1.4 },
+      { type: 'flyer', x: 400, min: 300, max: 530, baseY: 250, amp: 10, speed: 1.6 }
+    ],
+    boss: null,
+    spawnX: 80
+  },
+  {
+    name: '精密操控', stars: 4,
+    gravity: 0.48, jump: -14.5,
+    bg: ['#46a5de', '#bde8ff'],
+    ground: [],
+    platforms: [
+      { x: 10, y: 380, w: 150, h: 18 }, { x: 190, y: 330, w: 80, h: 18 },
+      { x: 310, y: 290, w: 120, h: 18 }, { x: 470, y: 300, w: 80, h: 18 },
+      { x: 600, y: 260, w: 200, h: 18 }, { x: 150, y: 360, w: 60, h: 18 }
+    ],
+    moving: [
+      { x: 250, y: 350, w: 70, h: 18, min: 240, max: 350, speed: 2.5 },
+      { x: 500, y: 300, w: 70, h: 18, min: 490, max: 590, speed: 2.5 }
+    ],
+    pipes: [{ x: 70, y: 350, w: 50, h: 30 }, { x: 350, y: 260, w: 50, h: 30 }],
+    ceilings: [{ x: 680, y: 213, w: 80, h: 22 }],
+    spikes: [],
+    enemies: [
+      { type: 'flyer', x: 170, min: 150, max: 215, baseY: 290, amp: 6, speed: 1.6 },
+      { type: 'flyer', x: 450, min: 430, max: 495, baseY: 260, amp: 6, speed: 1.6 },
+      { type: 'flyer', x: 575, min: 555, max: 625, baseY: 220, amp: 5, speed: 1.6 }
+    ],
+    boss: null,
+    spawnX: 30
+  },
+  {
+    name: '综合试炼', stars: 5,
+    gravity: 0.5, jump: -14,
+    bg: ['#41a1da', '#b9e6ff'],
+    ground: [{ x: 0, w: 240 }, { x: 680, w: 120 }],
+    platforms: [
+      { x: 240, y: 360, w: 60, h: 18 }, { x: 390, y: 340, w: 80, h: 18 },
+      { x: 560, y: 320, w: 80, h: 18 }, { x: 700, y: 300, w: 60, h: 18 },
+      { x: 620, y: 300, w: 60, h: 18 }
+    ],
+    moving: [
+      { x: 320, y: 330, w: 90, h: 18, mode: 'sine', mid: 320, range: 90, vAmp: 10, speed: 0.05, phase: 0 },
+      { x: 490, y: 290, w: 90, h: 18, mode: 'sine', mid: 490, range: 90, vAmp: 12, speed: 0.05, phase: 1.5 },
+      { x: 630, y: 260, w: 80, h: 18, mode: 'sine', mid: 630, range: 80, vAmp: 8, speed: 0.05, phase: 3 }
+    ],
+    pipes: [{ x: 45, y: 370, w: 45, h: 30 }, { x: 765, y: 370, w: 35, h: 30 }],
+    ceilings: [{ x: 130, y: 352, w: 80, h: 22 }, { x: 715, y: 352, w: 45, h: 22 }],
+    spikes: [{ x: 215, surfaceY: 400, w: 22, h: 16 }, { x: 590, surfaceY: 320, w: 18, h: 16 }],
+    enemies: [
+      // 第 9 关：f1 高悬起跳区上方（地面最大头顶 172 > 164）；
+      // f2/f3 高悬 fixed3 之后的终点区（玩家下坠远离、下蹲跳头顶最低 185 > 182）
+      { type: 'flyer', x: 60, min: 20, max: 140, baseY: 160, amp: 4, speed: 1.6 },
+      { type: 'flyer', x: 770, min: 745, max: 810, baseY: 178, amp: 4, speed: 1.6 },
+      { type: 'flyer', x: 785, min: 760, max: 820, baseY: 178, amp: 4, speed: 2.6 }
+    ],
+    boss: null,
+    spawnX: 20
+  },
+  {
+    name: '最终城堡', stars: 5,
+    gravity: 0.45, jump: -15,
+    bg: ['#3d9cd6', '#b5e3ff'],
+    ground: [{ x: 0, w: 120 }],
+    platforms: [
+      { x: 100, y: 370, w: 80, h: 18 }, { x: 200, y: 320, w: 120, h: 18 },
+      { x: 430, y: 310, w: 80, h: 18 }, { x: 540, y: 260, w: 80, h: 18 },
+      { x: 700, y: 300, w: 80, h: 18 }, { x: 760, y: 340, w: 80, h: 18 },
+      { x: 300, y: 355, w: 80, h: 18 }, { x: 620, y: 380, w: 80, h: 18 }
+    ],
+    moving: [
+      { x: 300, y: 300, w: 70, h: 18, min: 300, max: 490, speed: 3.2 },
+      { x: 560, y: 260, w: 70, h: 18, min: 560, max: 690, speed: 3.2 },
+      { x: 400, y: 250, w: 70, h: 18, min: 400, max: 590, speed: 3.5 },
+      { x: 640, y: 330, w: 70, h: 18, min: 640, max: 780, speed: 3.5 }
+    ],
+    pipes: [{ x: 55, y: 370, w: 40, h: 30 }, { x: 250, y: 290, w: 50, h: 30 }, { x: 450, y: 280, w: 40, h: 30 }],
+    ceilings: [],
+    spikes: [{ x: 340, surfaceY: 355, w: 18, h: 16 }, { x: 640, surfaceY: 380, w: 18, h: 16 }, { x: 800, surfaceY: 340, w: 16, h: 16 }],
+    enemies: [
+      { type: 'walker', x: 210, min: 205, max: 250, groundY: 320, speed: 1.5 },
+      // 第 10 关：f1 高悬起点区（地面最大头顶 172 > 164）；f2 悬于可选平台 p8 上方；
+      // f3 悬于终点 p6 上方（玩家下落远离、通关线先触发），均不堵必经跳跃
+      { type: 'flyer', x: 60, min: 20, max: 140, baseY: 160, amp: 4, speed: 1.6 },
+      { type: 'flyer', x: 355, min: 330, max: 380, baseY: 310, amp: 5, speed: 1.6 },
+      { type: 'flyer', x: 770, min: 770, max: 800, baseY: 256, amp: 5, speed: 2.6 }
+    ],
+    boss: { x: 700, y: 252, w: 60, h: 48, min: 700, max: 775, speed: 1.8, groundY: 300, hp: 3 },
+    spawnX: 12
+  }
+];
+
+// ==================== 三、DOM 与全局状态 ====================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const keys = { w: false, a: false, s: false, d: false };
+
+let state = 'menu';            // 'menu' | 'playing' | 'levelClear' | 'allClear' | 'gameOver'
+let levelIndex = 0;
+let lives = MAX_LIVES;
+let score = 0;
+let clearTimer = 0;
+let unlocked = 1;              // 已解锁关卡数（1~10）
+try {
+  const v = parseInt(localStorage.getItem('mario10_unlocked_v1'), 10);
+  if (v >= 1 && v <= 10) unlocked = v;
+} catch (e) { /* 离线环境无 localStorage 时忽略 */ }
+function saveUnlock() {
+  try { localStorage.setItem('mario10_unlocked_v1', String(unlocked)); } catch (e) {}
+}
+
+let player = null;
+let platforms = [];
+let movingPlatforms = [];
+let enemies = [];
+let spikes = [];
+
+// ==================== 四、平台（含移动平台） ====================
+class Platform {
+  constructor(x, y, w, h, color, oneWay = false) {
+    this.x = x; this.y = y; this.w = w; this.h = h;
+    this.color = color;
+    this.oneWay = oneWay;      // true=单向：只托住上方落下的玩家，可从下方穿过
+    this.moving = null;        // 移动平台配置；null = 静止
+    this.t = 0;
+    this.dir = 1;
+    this.prevX = x;
+    this.prevY = y;
+  }
+  update() {
+    if (!this.moving) return;
+    this.prevX = this.x;
+    this.prevY = this.y;
+    if (this.moving.mode === 'sine') {
+      // 第 9 关“不规则轨迹”：x、y 两个方向都按不同相位做正弦摆动
+      this.t += this.moving.speed;
+      this.x = this.moving.mid + Math.sin(this.t) * this.moving.range;
+      this.y = this.moving.y0 + Math.sin(this.t * 1.3 + 1.7) * this.moving.vAmp;
+    } else {
+      // 水平往复运动：碰到左右边界立即掉头
+      this.x += this.dir * this.moving.speed;
+      if (this.x <= this.moving.min) { this.x = this.moving.min; this.dir = 1; }
+      if (this.x + this.w >= this.moving.max) { this.x = this.moving.max - this.w; this.dir = -1; }
+    }
+  }
+  draw(ctx) {
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, this.w, this.h);
+    if (this.moving) {
+      // 移动平台画两个小箭头提示运动方向
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      const ay = this.y + this.h / 2;
+      const dx = this.dir;
+      ctx.beginPath();
+      ctx.moveTo(this.x + this.w / 2 - 14 * dx, ay - 4);
+      ctx.lineTo(this.x + this.w / 2 - 2 * dx, ay);
+      ctx.lineTo(this.x + this.w / 2 - 14 * dx, ay + 4);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(this.x + 0.5, this.y + 0.5, this.w - 1, this.h - 1);
+    }
+  }
+}
+
+// ==================== 五、敌人（蘑菇巡逻兵 / 飞行敌人 / Boss） ====================
+class Enemy {
+  constructor(cfg) {
+    this.type = cfg.type || 'walker';
+    this.w = cfg.w || 30;
+    this.h = cfg.h || 24;
+    this.x = cfg.x;
+    // walker 的 y 由所在表面顶边推出（脚底贴地）；flyer 的 y 由 baseY + 正弦摆动
+    this.y = this.type === 'flyer' ? cfg.baseY : cfg.groundY - this.h;
+    this.baseY = this.y;
+    this.min = cfg.min;
+    this.max = cfg.max;
+    this.speed = cfg.speed || 1.6;
+    this.amp = cfg.amp || 0;
+    this.phase = cfg.phase || Math.random() * 6.28;
+    this.t = 0;
+    this.dir = 1;
+    this.hp = cfg.hp || 1;
+    this.dead = false;
+    this.boss = !!cfg.boss;
+  }
+  get centerY() { return this.y + this.h / 2; }
+
+  update() {
+    if (this.dead) return;
+    this.t++;
+    this.x += this.dir * this.speed;
+    // 巡逻边界掉头：<= / >= 保证越界帧必被纠正
+    if (this.x <= this.min) { this.x = this.min; this.dir = 1; }
+    if (this.x + this.w >= this.max) { this.x = this.max - this.w; this.dir = -1; }
+    if (this.type === 'flyer') {
+      // 飞行敌人：水平巡逻同时做正弦上下浮动（phase 错开，轨迹不重复）
+      this.y = this.baseY + Math.sin(this.t * 0.08 + this.phase) * this.amp;
+    }
+  }
+
+  draw(ctx) {
+    if (this.dead) return;
+    const cx = this.x + this.w / 2;
+    const baseY = this.y + this.h;
+    if (this.type === 'flyer') {
+      // 紫色飞行敌人：椭圆身体 + 扇动翅膀
+      const flap = Math.sin(this.t * 0.3) * 4;
+      ctx.fillStyle = '#8e24aa';
+      ctx.beginPath();
+      ctx.ellipse(cx, this.y + this.h / 2, this.w / 2 - 2, this.h / 2 - 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#b06ab3';
+      ctx.beginPath();
+      ctx.moveTo(this.x + 2, this.y + this.h / 2 - 2);
+      ctx.lineTo(this.x - 8, this.y + this.h / 2 - 8 - flap);
+      ctx.lineTo(this.x + 6, this.y + this.h / 2 + 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(this.x + this.w - 2, this.y + this.h / 2 - 2);
+      ctx.lineTo(this.x + this.w + 8, this.y + this.h / 2 - 8 - flap);
+      ctx.lineTo(this.x + this.w - 6, this.y + this.h / 2 + 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx + (this.dir > 0 ? 2 : -4), this.y + this.h / 2 - 3, 2, 3);
+    } else if (this.boss) {
+      // Boss：尺寸翻倍的红色蘑菇，画血条
+      ctx.fillStyle = '#fff3e0';
+      ctx.fillRect(this.x + 10, baseY - 16, this.w - 20, 16);
+      ctx.fillStyle = '#c62828';
+      ctx.beginPath();
+      ctx.arc(cx, baseY - 16, this.w / 2, Math.PI, 0);
+      ctx.fill();
+      ctx.fillRect(this.x, baseY - 17, this.w, 3);
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(cx - 14, baseY - 28, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx + 10, baseY - 34, 4, 0, Math.PI * 2); ctx.fill();
+      // 眼睛
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx - 12, baseY - 42, 8, 6);
+      ctx.fillRect(cx + 4, baseY - 42, 8, 6);
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(cx - 10, baseY - 40, 3, 3);
+      ctx.fillRect(cx + 6, baseY - 40, 3, 3);
+      // 血条（3 格）
+      for (let i = 0; i < 3; i++) {
+        ctx.fillStyle = i < this.hp ? '#ff1744' : '#555';
+        ctx.fillRect(this.x + 6 + i * 18, this.y - 10, 14, 5);
+      }
+    } else {
+      // 普通红色蘑菇
+      ctx.fillStyle = '#fff3e0';
+      ctx.fillRect(this.x + 5, baseY - 8, this.w - 10, 8);
+      ctx.fillStyle = '#d32f2f';
+      ctx.beginPath();
+      ctx.arc(cx, baseY - 8, this.w / 2, Math.PI, 0);
+      ctx.fill();
+      ctx.fillRect(this.x, baseY - 9, this.w, 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(cx - 7, baseY - 15, 2.6, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx + 6, baseY - 18, 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+// ==================== 六、玩家 ====================
+class Player {
+  constructor() {
+    this.w = PLAYER_W;
+    this.h = PLAYER_H;
+    this.vx = 0;
+    this.vy = 0;
+    this.onGround = false;
+    this.crouching = false;
+    this.invincibleTimer = 0;
+    this.facing = 1;
+    this.prevBottom = 0;
+    this.prevTop = 0;
+  }
+  get bottom() { return this.y + this.h; }
+  get top() { return this.y; }
+
+  respawn(level) {
+    this.x = level.spawnX;
+    this.y = spawnYFor(level, level.spawnX);
+    this.vx = 0;
+    this.vy = 0;
+    this.onGround = false;
+    this.crouching = false;
+    this.h = PLAYER_H;
+    this.invincibleTimer = INVINCIBLE_TIME; // 重生后 1.5 秒无敌
+  }
+
+  // 下蹲：高度缩为 60%，脚底保持不动；恢复原高前检查头顶是否被实心平台挡住
+  setCrouching(crouching) {
+    if (this.crouching === crouching) return;
+    const newH = crouching ? Math.round(PLAYER_H * CROUCH_H_FACTOR) : PLAYER_H;
+    if (!crouching) {
+      const oldH = this.h;
+      const newY = this.y - (newH - oldH);
+      let blocked = false;
+      for (const p of platforms) {
+        if (p.oneWay) continue; // 单向砖块不阻挡抬头
+        // 恢复后的碰撞箱若与实心平台重叠则保持下蹲（隧道内不可站起）
+        if (this.x < p.x + p.w && this.x + this.w > p.x &&
+            newY < p.y + p.h && newY + newH > p.y) { blocked = true; break; }
+      }
+      if (blocked) return;
+    }
+    this.crouching = crouching;
+    if (crouching) {
+      const oldH = this.h;
+      this.h = newH;
+      this.y += oldH - this.h; // 脚底锚定：y 下移
+    } else {
+      const oldH = this.h;
+      this.h = newH;
+      this.y -= this.h - oldH; // 恢复原高：y 上移
+    }
+  }
+
+  update(dt, enemies, spikes) {
+    if (this.invincibleTimer > 0) {
+      this.invincibleTimer = Math.max(0, this.invincibleTimer - dt);
+    }
+    this.setCrouching(keys.s);
+
+    // —— 水平输入 ——
+    let targetVx = 0;
+    if (keys.a) targetVx -= MOVE_SPEED * (this.crouching ? CROUCH_SPEED_FACTOR : 1);
+    if (keys.d) targetVx += MOVE_SPEED * (this.crouching ? CROUCH_SPEED_FACTOR : 1);
+    if (targetVx !== 0) {
+      // 按住方向键：每帧加速 ACCEL，实现“持续加速”而非瞬间满速
+      this.vx += Math.sign(targetVx) * ACCEL;
+      if (Math.abs(this.vx) > Math.abs(targetVx)) this.vx = targetVx;
+      this.facing = Math.sign(targetVx);
+    } else if (this.onGround) {
+      // 地面摩擦：每帧保留 FRICTION 比例的速度，自然减速至停
+      this.vx *= FRICTION;
+      if (Math.abs(this.vx) < 0.05) this.vx = 0;
+    }
+
+    // —— 重力：数值来自当前关卡，逐关变化以改变跳跃手感 ——
+    this.vy += G;
+    if (this.vy > MAX_FALL_SPEED) this.vy = MAX_FALL_SPEED; // 限制下落速度防穿透
+
+    // —— 分轴移动：先 X 后 Y ——
+    this.prevBottom = this.bottom;
+    this.prevTop = this.top;
+    this.x += this.vx;
+    this.checkCollision(true);
+    this.y += this.vy;
+    this.checkCollision(false);
+
+    // —— 被移动平台携带（平台已在本帧先更新，delta 直接叠加给玩家）——
+    for (const mp of movingPlatforms) {
+      if (Math.abs(this.bottom - mp.y) < 1 &&
+          this.x < mp.x + mp.w && this.x + this.w > mp.x) {
+        this.x += mp.x - mp.prevX;
+        this.y += mp.y - mp.prevY;
+        this.onGround = true;
+      }
+    }
+
+    // —— 敌人碰撞（严格伤害判定）——
+    let gameOverReset = false;
+    for (const enemy of enemies) {
+      if (enemy.dead) continue;
+      const overlapX = this.x < enemy.x + enemy.w && this.x + this.w > enemy.x;
+      const overlapY = this.y < enemy.y + enemy.h && this.y + this.h > enemy.y;
+      if (!(overlapX && overlapY)) continue;
+      // 踩踏窗口：正在下落(vy>0) 且脚底落在 敌人中心点 到 其下方10px 之间
+      const inStompWindow = this.bottom >= enemy.centerY && this.bottom <= enemy.centerY + 10;
+      // 是否“正从敌人头顶上方落下”：上一帧脚底还在敌人中心点以上。
+      // 为什么用中心点而非顶边+小容差：下落速度可达 6px/帧，小容差会在
+      // 脚底穿过顶边后的第一帧就失效，导致“踩踏前的重叠”被误判为侧面碰撞
+      const comingFromAbove = this.prevBottom <= enemy.centerY;
+      if (this.vy > 0 && inStompWindow) {
+        score += STOMP_SCORE;
+        if (enemy.hp > 1) {
+          // Boss：多段血量，踩中后弹起以便连续踩踏
+          enemy.hp -= 1;
+          this.vy = JUMP * 0.55;
+          // 弹起上升阶段身体仍与 Boss 重叠，给 0.45 秒无敌防止上升途中被侧面碰撞误杀
+          this.invincibleTimer = Math.max(this.invincibleTimer, 0.45);
+        } else {
+          enemy.dead = true; // 普通敌人一击消失
+        }
+      } else if (this.invincibleTimer <= 0 && !(this.vy > 0 && comingFromAbove)) {
+        // 侧面碰撞：只有“不是正从上方落下”的接触才算死亡
+        gameOverReset = this.die();
+        break;
+      }
+    }
+
+    // —— 尖刺：触碰即死（无视无敌）——
+    if (!gameOverReset) {
+      for (const s of spikes) {
+        if (this.x < s.x + s.w && this.x + this.w > s.x &&
+            this.y < s.y + s.h && this.y + this.h > s.y) {
+          this.die();
+          break;
+        }
+      }
+    }
+
+    // —— 掉落画布底部 ——
+    if (!gameOverReset && this.y > FALL_DEATH_Y) {
+      this.die();
+    }
+  }
+
+  checkCollision(isHorizontal) {
+    if (isHorizontal) {
+      // —— 侧面碰撞：在全部重叠的实心障碍中，选取“位移最小”的修正目标 ——
+      // 为什么取最小位移：走廊/管道并排时，两个障碍会同时挡住玩家，
+      // 若按遍历顺序逐个弹回会把玩家来回推挤（如在管道与天花板之间抖动）；
+      // 取最接近当前位置的弹回点可稳定停在入口处
+      let bestX = null;
+      for (const p of platforms) {
+        if (p.oneWay) continue; // 单向砖块不挡侧面
+        const overlapX = this.x < p.x + p.w && this.x + this.w > p.x;
+        const overlapY = this.y < p.y + p.h && this.y + this.h > p.y;
+        if (!(overlapX && overlapY)) continue;
+        if (this.vx > 0) {
+          const cand = p.x - this.w;
+          if (bestX === null || cand > bestX) bestX = cand;
+        } else if (this.vx < 0) {
+          const cand = p.x + p.w;
+          if (bestX === null || cand < bestX) bestX = cand;
+        }
+      }
+      if (bestX !== null) {
+        this.x = bestX; // 弹回障碍物边缘
+        this.vx = 0;    // x 速度清零
+      }
+      return;
+    }
+    for (const p of platforms) {
+      const overlapX = this.x < p.x + p.w && this.x + this.w > p.x;
+      const overlapY = this.y < p.y + p.h && this.y + this.h > p.y;
+      if (!(overlapX && overlapY)) continue;
+
+      if (p.oneWay) {
+        // 单向砖块：仅当下落且上一帧脚底未越过砖顶时托住（可穿下不可穿上）
+        if (this.vy >= 0 && this.prevBottom <= p.y) {
+          this.y = p.y - this.h; // 修正坐标，真正“站”在平台上
+          this.vy = 0;
+          this.onGround = true;
+        }
+      } else {
+        // 实心平台：落地托住 / 顶头压回
+        if (this.vy >= 0 && (this.prevBottom <= p.y || (this.prevTop < p.y && this.prevBottom < p.y + p.h))) {
+          this.y = p.y - this.h;
+          this.vy = 0;
+          this.onGround = true;
+        } else if (this.vy < 0 && this.prevTop >= p.y + p.h) {
+          this.y = p.y + p.h;
+          this.vy = 0;
+        }
+      }
+    }
+  }
+
+  draw(ctx) {
+    let alpha = 1;
+    if (this.invincibleTimer > 0) {
+      // 无敌闪烁：globalAlpha 交替变化
+      alpha = (Math.floor(this.invincibleTimer * 10) % 2 === 0) ? 1 : 0.35;
+    }
+    ctx.globalAlpha = alpha;
+    const feetY = this.y + this.h;
+    const cx = this.x + this.w / 2;
+    if (this.crouching) {
+      ctx.fillStyle = '#e53935';
+      ctx.fillRect(this.x + 2, feetY - 11, this.w - 4, 11);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx + (this.facing > 0 ? 1 : -4), feetY - 8, 3, 3);
+    } else {
+      ctx.fillStyle = '#e53935';
+      ctx.fillRect(this.x + 5, feetY - 13, this.w - 10, 13);
+      ctx.beginPath();
+      ctx.arc(cx, feetY - 19, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#b71c1c';
+      ctx.fillRect(this.x + 2, feetY - 24, this.w - 4, 5);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx + (this.facing > 0 ? 1 : -3), feetY - 21, 2, 3);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // 死亡：生命减 1；耗尽则游戏结束，否则当前关卡起点重生
+  die() {
+    lives -= 1;
+    if (lives <= 0) {
+      state = 'gameOver';
+      return true;
+    }
+    this.respawn(LEVELS[levelIndex]);
+    return false;
+  }
+}
+
+// ==================== 七、关卡构建 ====================
+function spawnYFor(level, x) {
+  for (const g of level.ground) {
+    if (g.x <= x && x < g.x + g.w) return GROUND_Y - PLAYER_H; // 站在地面上
+  }
+  for (const p of level.platforms) {
+    if (p.x <= x && x < p.x + p.w) return p.y - PLAYER_H;      // 站在平台上
+  }
+  return 300;
+}
+
+function loadLevel(idx) {
+  levelIndex = idx;
+  const L = LEVELS[idx];
+  G = L.gravity;
+  JUMP = L.jump;
+  platforms = [];
+  movingPlatforms = [];
+  enemies = [];
+  spikes = [];
+
+  for (const g of L.ground) platforms.push(new Platform(g.x, GROUND_Y, g.w, GROUND_H, '#1e7d32', false));
+  for (const p of L.pipes) platforms.push(new Platform(p.x, p.y, p.w, p.h, '#d32f2f', false));
+  for (const c of L.ceilings) platforms.push(new Platform(c.x, c.y, c.w, c.h, '#8d6e63', false));
+  for (const p of L.platforms) platforms.push(new Platform(p.x, p.y, p.w, p.h, '#e07b00', true));
+  for (const m of L.moving) {
+    const mp = new Platform(m.x, m.y, m.w, m.h, '#0097a7', true);
+    if (m.mode === 'sine') {
+      mp.moving = { mode: 'sine', mid: m.mid, range: m.range, y0: m.y, vAmp: m.vAmp, speed: m.speed };
+    } else {
+      mp.moving = { mode: 'linear', min: m.min, max: m.max, speed: m.speed };
+    }
+    mp.t = m.phase || 0;
+    movingPlatforms.push(mp);
+    platforms.push(mp);
+  }
+  for (const e of L.enemies) enemies.push(new Enemy(e));
+  if (L.boss) enemies.push(new Enemy(Object.assign({ boss: true }, L.boss)));
+  for (const s of L.spikes) spikes.push({ x: s.x, y: s.surfaceY - s.h, w: s.w, h: s.h, surfaceY: s.surfaceY });
+
+  player = new Player();
+  player.x = L.spawnX;
+  player.y = spawnYFor(L, L.spawnX);
+}
+
+function startRun(idx) {
+  lives = MAX_LIVES;
+  score = 0;
+  loadLevel(idx);
+  state = 'playing';
+}
+
+// ==================== 八、游戏流程 ====================
+function update(dt) {
+  if (state === 'levelClear') {
+    // 过关动画：1.5 秒后自动进入下一关
+    clearTimer -= dt;
+    if (clearTimer <= 0) {
+      if (levelIndex >= LEVELS.length - 1) {
+        state = 'allClear'; // 最终关通过：显示总分
+      } else {
+        loadLevel(levelIndex + 1);
+        state = 'playing';
+      }
+    }
+    return;
+  }
+  if (state !== 'playing') return;
+
+  for (const mp of movingPlatforms) mp.update(); // 移动平台先动，玩家随后可被携带
+  player.update(dt, enemies, spikes);
+  for (const enemy of enemies) enemy.update();
+
+  // —— 通关判定：x > 780 ——
+  if (player.x > WIN_X) {
+    score += CLEAR_SCORE; // 通关 +500
+    unlocked = Math.max(unlocked, Math.min(levelIndex + 2, 10)); // 解锁下一关（上限 10）
+    saveUnlock();
+    clearTimer = 1.5;
+    state = 'levelClear';
+  }
+}
+
+// ==================== 九、渲染 ====================
+const menuButtons = []; // 选关界面按钮（用于点击命中测试）
+
+function drawSky(L) {
+  const sky = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+  sky.addColorStop(0, L.bg[0]);
+  sky.addColorStop(1, L.bg[1]);
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+}
+
+function drawSpike(s) {
+  // 灰色三角尖刺
+  ctx.fillStyle = '#9e9e9e';
+  ctx.beginPath();
+  ctx.moveTo(s.x, s.y + s.h);
+  ctx.lineTo(s.x + s.w / 2, s.y);
+  ctx.lineTo(s.x + s.w, s.y + s.h);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#616161';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function renderGame() {
+  const L = LEVELS[levelIndex];
+  drawSky(L);
+  for (const p of platforms) p.draw(ctx);
+  for (const s of spikes) drawSpike(s);
+  for (const e of enemies) e.draw(ctx);
+  player.draw(ctx);
+
+  // —— HUD ——
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '13px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`第 ${levelIndex + 1}/10 关 · ${L.name}`, 8, 16);
+  ctx.font = '11px monospace';
+  ctx.fillText(
+    `FPS: ${fps}   x: ${Math.round(player.x)}   y: ${Math.round(player.y)}   velocityY: ${player.vy.toFixed(2)}`,
+    8, 32
+  );
+  ctx.textAlign = 'right';
+  ctx.font = '13px monospace';
+  ctx.fillText(`得分: ${score}   生命: ${'♥'.repeat(Math.max(lives, 0))}`, CANVAS_W - 8, 16);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = '11px monospace';
+  ctx.fillText('W 跳跃   A/D 移动   S 下蹲   R 重开关卡', CANVAS_W / 2, CANVAS_H - 8);
+
+  // —— 过关动画 ——
+  if (state === 'levelClear') {
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.fillStyle = '#ffe082';
+    ctx.font = '34px monospace';
+    ctx.fillText(`第 ${levelIndex + 1} 关通过！`, CANVAS_W / 2, CANVAS_H / 2 - 8);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '15px monospace';
+    ctx.fillText(`+${CLEAR_SCORE} 分`, CANVAS_W / 2, CANVAS_H / 2 + 24);
+  }
+}
+
+function renderMenu() {
+  drawSky(LEVELS[0]);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '32px monospace';
+  ctx.fillText('二维平面超级马里奥', CANVAS_W / 2, 58);
+  ctx.font = '16px monospace';
+  ctx.fillStyle = '#ffe082';
+  ctx.fillText(`已解锁 ${unlocked}/10 关`, CANVAS_W / 2, 96);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.font = '12px monospace';
+  ctx.fillText('点击关卡开始（WASD 操控，共 5 条命）', CANVAS_W / 2, 126);
+
+  menuButtons.length = 0;
+  const bw = 130, bh = 78, gap = 20, y0 = 170;
+  for (let i = 0; i < 10; i++) {
+    const col = i % 5, row = Math.floor(i / 5);
+    const bx = 40 + col * (bw + gap);
+    const by = y0 + row * (bh + 26);
+    menuButtons.push({ x: bx, y: by, w: bw, h: bh, idx: i });
+    const locked = i >= unlocked;
+    // 已解锁：橙色按钮；未解锁：深灰 + 锁
+    ctx.fillStyle = locked ? '#3a3f4a' : (i === 0 ? '#ff9800' : '#e07b00');
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = locked ? '#555b66' : '#ffd180';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
+    ctx.fillStyle = locked ? '#888' : '#ffffff';
+    ctx.font = '26px monospace';
+    ctx.fillText(String(i + 1), bx + bw / 2, by + 38);
+    ctx.font = '11px monospace';
+    ctx.fillText(LEVELS[i].name, bx + bw / 2, by + 58);
+    if (locked) {
+      // 锁图标
+      ctx.strokeStyle = '#aaa';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(bx + bw / 2, by + 18, 5, Math.PI, 0);
+      ctx.stroke();
+      ctx.fillRect(bx + bw / 2 - 8, by + 18, 16, 12);
+      ctx.strokeStyle = '#666';
+      ctx.strokeRect(bx + bw / 2 - 8, by + 18, 16, 12);
+    } else {
+      const stars = '★'.repeat(LEVELS[i].stars);
+      ctx.fillStyle = '#fff3e0';
+      ctx.font = '10px monospace';
+      ctx.fillText(stars, bx + bw / 2, by + 72);
+    }
+  }
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '12px monospace';
+  ctx.fillText('W 跳跃  A/D 移动  S 下蹲  R 重开关卡', CANVAS_W / 2, CANVAS_H - 20);
+}
+
+function drawCenterPanel(title, sub) {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '34px monospace';
+  ctx.fillText(title, CANVAS_W / 2, 170);
+  ctx.font = '16px monospace';
+  ctx.fillStyle = '#ffe082';
+  ctx.fillText(sub, CANVAS_W / 2, 210);
+  // 返回选关按钮
+  ctx.fillStyle = '#e07b00';
+  ctx.fillRect(300, 250, 200, 46);
+  ctx.strokeStyle = '#ffd180';
+  ctx.strokeRect(301, 251, 198, 44);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '16px monospace';
+  ctx.fillText('返回选关', CANVAS_W / 2, 280);
+}
+
+function render() {
+  if (state === 'menu') { renderMenu(); return; }
+  if (state === 'allClear') {
+    drawSky(LEVELS[9]);
+    drawCenterPanel('恭喜通关！', `最终得分：${score}   (解锁全部 10 关)`);
+    return;
+  }
+  if (state === 'gameOver') {
+    drawSky(LEVELS[levelIndex]);
+    drawCenterPanel('游戏结束', `到达第 ${levelIndex + 1} 关 · 得分 ${score}`);
+    return;
+  }
+  renderGame();
+}
+
+// ==================== 十、主循环（60FPS 节流 + 固定步长物理） ====================
+let lastTime = 0;
+let acc = 0;
+let fps = 60;
+let frameCount = 0;
+let fpsTimer = 0;
+
+function gameLoop(ts) {
+  requestAnimationFrame(gameLoop);
+  const elapsed = (ts - lastTime) / 1000;
+  // 帧率节流：间隔不足 1/60 秒的冗余帧直接丢弃（不更新也不重绘）
+  if (elapsed < STEP - 0.0005) return;
+  lastTime = ts;
+  acc += Math.min(elapsed, MAX_FRAME_DELTA);
+  // 固定步长物理：每 1/60 秒补一次 update
+  while (acc >= STEP) {
+    update(STEP);
+    acc -= STEP;
+  }
+  frameCount++;
+  fpsTimer += elapsed;
+  if (fpsTimer >= 0.5) {
+    fps = Math.round(frameCount / fpsTimer);
+    frameCount = 0;
+    fpsTimer = 0;
+  }
+  render();
+}
+
+// ==================== 十一、输入（仅 WASD + R + 鼠标选关） ====================
+window.addEventListener('keydown', (e) => {
+  switch (e.code) {
+    case 'KeyW':
+      // 仅在地面状态且为“新按下”时起跳，长按连发不会二段跳
+      if (!keys.w && player && player.onGround && state === 'playing') {
+        player.vy = JUMP;
+        player.onGround = false;
+      }
+      keys.w = true;
+      e.preventDefault();
+      break;
+    case 'KeyA':
+      keys.a = true;
+      e.preventDefault();
+      break;
+    case 'KeyS':
+      keys.s = true;
+      e.preventDefault();
+      break;
+    case 'KeyD':
+      keys.d = true;
+      e.preventDefault();
+      break;
+    case 'KeyR':
+      // 重开关卡：保留分数与生命，从当前关起点重新开始
+      if (state === 'playing' || state === 'levelClear') {
+        loadLevel(levelIndex);
+        state = 'playing';
+      }
+      e.preventDefault();
+      break;
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  switch (e.code) {
+    case 'KeyW': keys.w = false; e.preventDefault(); break;
+    case 'KeyA': keys.a = false; e.preventDefault(); break;
+    case 'KeyS': keys.s = false; e.preventDefault(); break;
+    case 'KeyD': keys.d = false; e.preventDefault(); break;
+    case 'KeyR': e.preventDefault(); break;
+  }
+});
+
+window.addEventListener('blur', () => {
+  keys.w = keys.a = keys.s = keys.d = false;
+});
+
+canvas.addEventListener('click', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  if (state === 'menu') {
+    for (const b of menuButtons) {
+      if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+        if (b.idx < unlocked) startRun(b.idx);
+        break;
+      }
+    }
+  } else if (state === 'allClear' || state === 'gameOver') {
+    // “返回选关”按钮区域
+    if (mx >= 300 && mx <= 500 && my >= 250 && my <= 296) {
+      state = 'menu';
+    }
+  }
+});
+
+// 启动
+requestAnimationFrame(gameLoop);
+})();
+</script>
+</body>
+</html>
