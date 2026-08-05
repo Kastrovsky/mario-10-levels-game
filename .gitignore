@@ -1,0 +1,17 @@
+# Mac系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows系统文件
+Thumbs.db
+ehthumbs.db
+
+# VSCode编辑器配置
+.vscode/
+*.code-workspace
+
+# 临时文件
+*.log
+*.tmp
+*.bak
